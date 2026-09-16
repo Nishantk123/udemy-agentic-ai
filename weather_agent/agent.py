@@ -2,9 +2,25 @@ from openai import OpenAI
 from dotenv import load_dotenv
 import json
 import requests
+from pydantic import BaseModel, Field
+from typing import Optional
+import subprocess
 load_dotenv()
 
 client = OpenAI() 
+
+def run_command(cmd: str):
+    result = subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", cmd],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = result.stdout.strip()
+    error = result.stderr.strip()
+    if error:
+        output = f"{output}\n{error}".strip()
+    return {"output": output, "return_code": result.returncode}
 
 def get_weather(city):
     url = f"https://wttr.in/{city.lower()}?format=%C+%t"
@@ -14,7 +30,8 @@ def get_weather(city):
     return f"Sorry, I couldn't fetch weather information for {city}."
 
 available_tools = {
-    "get_weather": get_weather
+    "get_weather": get_weather,
+    "run_command": run_command
 }
 
 SYSTEM_PROMPT = """
@@ -30,13 +47,18 @@ Rules:
 - only run one step at a time.
 - The sequence of steps is START (where user gives an input), PLAN (That can be multiple times)
 and finally OUTPUT (which is going to the displayed to the user).
+- For any request that changes files or folders, you MUST emit a TOOL step using run_command with the actual command before claiming the work is complete.
+- After emitting a TOOL step, wait for the OBSERVE result. Only claim success when the result has return_code 0; otherwise explain the error.
+- Do not describe a planned command as completed. A PLAN step is not execution.
+- For file creation, use one PowerShell Set-Content command per file with a literal here-string: Set-Content -Path '.\\todo_app\\index.html' -Value @' ... '@. Never wrap the complete file in quotes, Python repr, or JSON.
+- After creating files, use Test-Path and Get-Content to verify each file before reporting success.
 
 Output JSON format:
 {"step":"START" | "PLAN" | "OUTPUT" | "TOOL", "content": "string", "tool": "string", "input": "string"}
 
 Available tools:
 - get_weather(city: str): Takes city name as input string and return the weather info about the city.
-
+- run_command(cmd: str): Takes a system command as a string, executes it on the user's system, and returns its output and return code. This workspace runs on Windows, so use PowerShell-compatible commands.
 
 Example 1:
 START: Hey, Can you solve 2 + 3 * 5 / 10
@@ -66,6 +88,13 @@ OUTPUT: {"step":"OUTPUT", "content":"The temperature in Delhi is 35°C and the w
 
 print("\n\n\n\n")
 
+class MyOutputFormat(BaseModel):
+    step: str = Field(..., description="The ID of the step. Example: PLAN, STEP, OUTPUT, TOOL, etc")
+    content: Optional[str]= Field(None, description="The optional string content for the step.")
+    tool: Optional[str] = Field(None, description="The ID of the tool to call.")
+    input: Optional[str] = Field(None, description="The input param for the tool to call.")
+
+    
 message_history = [
     {"role": "system", "content": SYSTEM_PROMPT}
 ]
@@ -73,22 +102,22 @@ while True:
     user_query = input(">")
     message_history.append({"role": "user", "content": user_query})
     while True:
-        response = client.chat.completions.create(
+        response = client.chat.completions.parse(
             model="gpt-4o-mini",
-            response_format={"type": "json_object"},
+            response_format= MyOutputFormat,
             messages=message_history
         )
         raw_result = response.choices[0].message.content
         message_history.append({"role": "assistant", "content": raw_result})
 
-        parsed_result = json.loads(raw_result)
+        parsed_result = response.choices[0].message.parsed
 
-        if parsed_result["step"] == "START":
-            print(f"START: {parsed_result['content']}")
+        if parsed_result.step == "START":
+            print(f"START: {parsed_result.content}")
             continue
-        if parsed_result["step"] == "TOOL":
-            tool_to_call = parsed_result.get("tool") or parsed_result.get("TOOL")
-            tool_input = parsed_result["input"]
+        if parsed_result.step == "TOOL":
+            tool_to_call = parsed_result.tool
+            tool_input = parsed_result.input
             print(f"tool: {tool_to_call} called with input: {tool_input}")
             if tool_to_call in available_tools:
                 tool_output = available_tools[tool_to_call](tool_input)
@@ -100,11 +129,11 @@ while True:
             else:
                 print(f"Tool {tool_to_call} not found.")
                 
-        if parsed_result["step"] == "PLAN":
-            print(f"PLAN: {parsed_result['content']}")
+        if parsed_result.step == "PLAN":
+            print(f"PLAN: {parsed_result.content}")
             continue
-        if parsed_result["step"] == "OUTPUT":
-            print(f"OUTPUT: {parsed_result['content']}")
+        if parsed_result.step == "OUTPUT":
+            print(f"OUTPUT: {parsed_result.content}")
             break
         print("\n\n\n\n")
         
