@@ -21,6 +21,14 @@ config = {
         "provider":"openai",
         "config":{"api_key": OPENAI_API_KEY, "model":"gpt-4.1"}
     },
+    "graph_store":{
+        "provider":"neo4j",
+        "config":{
+            "url":"neo4j+s://f851c233.databases.neo4j.io",
+            "username":"f851c233",
+            "password":"3M3NZXKkTiYQdLcDkVKn5Yw4xa1Vs-GHVZSUGQuJIPo"
+        }
+    },
     "vector_store": {
         "provider":"qdrant",
         "config":{
@@ -33,7 +41,14 @@ config = {
 mem_client = Memory.from_config(config)
 
 while True:
-    user_query = input(">")
+    try:
+        user_query = input(">").strip()
+    except (EOFError, KeyboardInterrupt):
+        print()
+        break
+
+    if not user_query:
+        continue
 
     search_memory = mem_client.search(
         query=user_query,
